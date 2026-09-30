@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # test52: test38's model/sampler (unchanged) on an SiO2 Si-only CG mapping (one CG site per
-# original Si atom, every O dropped). Single script, three argparse subcommands (STAGE):
-#   qsub -P PROJECT_ID -v STAGE=prepare,OUTPUT=sio2-si-only/dataset-pilot      run_test52.pbs
-#   qsub -P PROJECT_ID -v STAGE=train,DATASET=sio2-si-only/dataset-pilot,OUTPUT=sio2-si-only/checkpoint1 run_test52.pbs
+# original Si atom, every O dropped), with periodic (torus) noise. Single script, three argparse
+# subcommands (STAGE). `train` needs no `prepare` step first -- it defaults to the bundled
+# sio2-si-only/dataset-dense/ (4308 frames, --replicate 2, built from md/nvt_traj_0..7.lammpstrj):
+#   qsub -P PROJECT_ID -v STAGE=train,OUTPUT=sio2-si-only/checkpoint1 run_test52.pbs
 #   qsub -P PROJECT_ID -v STAGE=generate,CHECKPOINT=sio2-si-only/checkpoint1/checkpoint.pt,OUTPUT=sio2-si-only/checkpoint1/generated run_test52.pbs
+# `prepare` remains available for building a custom dataset from your own trajectory files:
+#   qsub -P PROJECT_ID -v STAGE=prepare,OUTPUT=sio2-si-only/dataset-custom,TRAJECTORIES="..." run_test52.pbs
 # Unlike test45-49, DM2/graphite is not needed -- test52.py is fully self-contained (see its own
 # module docstring), so no DM2_ROOT bind-mount is set up here.
 #PBS -q sg8
@@ -45,7 +48,9 @@ case "$stage" in
         [[ -n "${OFFSET:-}"           ]] && args+=(--offset "$OFFSET")
         ;;
     train)
-        args+=(--dataset "${DATASET:?Set DATASET}" --output "${OUTPUT:?Set OUTPUT}")
+        args+=(--output "${OUTPUT:?Set OUTPUT}")
+        # DATASET is optional -- test52.py's own default is the bundled sio2-si-only/dataset-dense/
+        [[ -n "${DATASET:-}"          ]] && args+=(--dataset "$DATASET")
         [[ -n "${WARM_START:-}"          ]] && args+=(--warm-start "$WARM_START")
         [[ -n "${UPDATES:-}"             ]] && args+=(--updates "$UPDATES")
         [[ -n "${BATCH_SIZE:-}"          ]] && args+=(--batch-size "$BATCH_SIZE")

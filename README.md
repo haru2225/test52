@@ -20,12 +20,19 @@ around one fixed registration.
 dumps directly with a small bespoke parser (not ASE — these dumps carry no species/mass info,
 just `id type xu yu zu`; type 1 → Si, type 2 → O, verified against `md/nvt_traj_0.lammpstrj`'s own
 first-frame atom-type counts: 64 of type 1, 128 of type 2, matching SiO2's 1:2 ratio) and can pull
-far more, denser frames — e.g. `--stride 20` on all four trajectories gives ~1800 frames instead
-of 184. **This is still all one crystal's thermal ensemble, not new structural diversity** — just
-a much larger and less redundant sample of it. The raw `.lammpstrj` files are **not bundled** in
-this repo (66 MB each) — point `--trajectories` at your own copy of the main ScoreMD repo's `md/`
-directory. `--reference-frames` (test50/51's original path) still works unchanged as the default
-when `--trajectories` isn't given.
+far more, denser frames than the bundled 184-frame npz. The raw `.lammpstrj` files themselves are
+**not bundled** in this repo (tens of MB each) — point `--trajectories` at your own copy if you
+want to rebuild the dataset from scratch or with different files. `--reference-frames` (test50/51's
+original path) still works unchanged as a `prepare` input when `--trajectories` isn't given.
+
+**`train` doesn't need a `prepare` step at all** — `sio2-si-only/dataset-dense/` (bundled, ~26 MB)
+is the *already-prepared* result of running `prepare` against **8** trajectories: the original
+`md/nvt_traj_0..3.lammpstrj` (10,001 dumped frames each, 2 ns/replica) **plus 4 new, independent**
+replicas run locally for this file, `md/nvt_traj_4..7.lammpstrj` (same input structure and Vashishta
+potential, different seeds, 354,000 steps/replica, ~12 min each on 4 parallel CPU cores) — genuinely
+new thermal samples, not just a denser re-read of the same 4 trajectories. Built with
+`--offset 500 --stride 10 --replicate 2`: **4308 frames, 512 Si sites, 27.146 Å cell**. `train`'s
+own `--dataset` now defaults to this bundled directory.
 
 ## 2. Periodic (torus) noise, replacing RattleParticles + raw displacement target
 
@@ -62,6 +69,8 @@ each vendor from test38.py.
 
 ## Usage
 
+No `prepare` step needed — the dataset ships in the repo.
+
 ```bash
 git clone git@github.com:haru2225/test52.git
 cd test52
@@ -69,19 +78,12 @@ cd test52
 module load singularity
 singularity build test52.sif Singularity.def
 
-# 1. Dataset: dense sample straight from the raw NVT trajectories, 2x2x2-tiled
-#    (point TRAJECTORIES at your own copy of the main repo's md/ directory)
-qsub -P PROJECT_ID -v STAGE=prepare,OUTPUT=sio2-si-only/dataset-dense,REPLICATE=2,\
-TRAJECTORIES="/path/to/md/nvt_traj_0.lammpstrj /path/to/md/nvt_traj_1.lammpstrj /path/to/md/nvt_traj_2.lammpstrj /path/to/md/nvt_traj_3.lammpstrj",\
-OFFSET=1000,STRIDE=20 \
-    run_test52.pbs
+# 1. Train directly against the bundled sio2-si-only/dataset-dense/
+#    (cutoff=8.0/8.2, irreps l<=4, updates=50000 inherited from test50;
+#    sigma-max auto-defaults to the dataset's own box length, 27.146 A)
+qsub -P PROJECT_ID -v STAGE=train,OUTPUT=sio2-si-only/checkpoint1 run_test52.pbs
 
-# 2. Train (cutoff=8.0/8.2, irreps l<=4, updates=50000 inherited from test50;
-#    sigma-max auto-defaults to the box's own longest side, e.g. 27.146 A for --replicate 2)
-qsub -P PROJECT_ID -v STAGE=train,DATASET=sio2-si-only/dataset-dense,OUTPUT=sio2-si-only/checkpoint1 \
-    run_test52.pbs
-
-# 3. Generate, now with a well-defined --init random
+# 2. Generate, now with a well-defined --init random
 qsub -P PROJECT_ID -v STAGE=generate,CHECKPOINT=sio2-si-only/checkpoint1/checkpoint.pt,\
 OUTPUT=sio2-si-only/checkpoint1/generated,INIT=random,\
 REVERSE_STEPS=3000,DETERMINISTIC_STEPS=300,TRAJECTORY_STRIDE=10 \
@@ -91,21 +93,32 @@ REVERSE_STEPS=3000,DETERMINISTIC_STEPS=300,TRAJECTORY_STRIDE=10 \
 Locally (no PBS/Singularity):
 
 ```bash
-python test52.py prepare --trajectories ../../../md/nvt_traj_0.lammpstrj \
-    ../../../md/nvt_traj_1.lammpstrj ../../../md/nvt_traj_2.lammpstrj ../../../md/nvt_traj_3.lammpstrj \
-    --offset 1000 --stride 20 --replicate 2 --output sio2-si-only/dataset-dense
-python test52.py train --dataset sio2-si-only/dataset-dense --output sio2-si-only/checkpoint1 --device cuda
+python test52.py train --output sio2-si-only/checkpoint1 --device cuda   # uses bundled dataset-dense/
 python test52.py generate --checkpoint sio2-si-only/checkpoint1/checkpoint.pt \
     --output sio2-si-only/checkpoint1/generated --init random --device cuda
+```
+
+To rebuild the dataset yourself (e.g. from your own additional trajectories), `prepare` is still
+there:
+
+```bash
+qsub -P PROJECT_ID -v STAGE=prepare,OUTPUT=sio2-si-only/dataset-custom,REPLICATE=2,\
+TRAJECTORIES="/path/to/md/nvt_traj_0.lammpstrj /path/to/md/nvt_traj_1.lammpstrj ...",\
+OFFSET=500,STRIDE=10 \
+    run_test52.pbs
+# then point STAGE=train at DATASET=sio2-si-only/dataset-custom
 ```
 
 ## Status
 
 Smoke-tested locally (CPU): `prepare` from raw trajectories (single-file, multi-file, combined
-with `--replicate`), `train` with the auto-computed sigma-max, and `generate` in all three `--init`
-modes all run end to end without error. The sigma-max validity guard was verified to correctly
-reject an under-sized `--sigma-max` (e.g. test50's old default of 1.5, which fails badly on this
-box — Fourier residual 0.79 instead of the required ≤1e-5) and to accept the auto-computed default.
+with `--replicate`), `train` with the auto-computed sigma-max — including a full run against the
+**actual bundled `dataset-dense/`** (4308 frames, cutoff=8, l≤4, 512 atoms/graph; 3 updates
+completed correctly, checkpoint saved, ~14 MB) — and `generate` in all three `--init` modes all run
+end to end without error. The sigma-max validity guard was verified to correctly reject an
+under-sized `--sigma-max` (e.g. test50's old default of 1.5, which fails badly on this box —
+Fourier residual 0.79 instead of the required ≤1e-5) and to accept the auto-computed default.
 `generate --init random`'s periodic wrap was verified to keep all positions within the cell.
-**Not yet trained for real or run on GPU** — whether periodic noise + denser data actually closes
-the per-atom lattice-site gap test50 showed is unverified.
+**Not yet trained for real (only a few smoke-test updates) or run on GPU** — whether periodic noise
++ denser, genuinely-independent 8-replica data actually closes the per-atom lattice-site gap
+test50 showed is unverified.

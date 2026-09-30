@@ -1198,7 +1198,11 @@ def parser():
     p.set_defaults(handler=prepare)
 
     p = sub.add_parser("train", help="sigma-conditioned NequIP_TimeEmbed + periodic (torus) noise + wrapped-score MSE")
-    p.add_argument("--dataset", type=Path, required=True)
+    p.add_argument("--dataset", type=Path, default=ROOT / "sio2-si-only" / "dataset-dense",
+                   help="Defaults to the bundled sio2-si-only/dataset-dense/ (4308 frames, "
+                        "--replicate 2, built from md/nvt_traj_0..7.lammpstrj -- see README) so "
+                        "`train` runs directly with no `prepare` step and no raw trajectory "
+                        "files needed on the HPC side.")
     p.add_argument("--warm-start", type=Path, default=None,
                    help="Plain (non-time-conditioned) NequIP checkpoint, same architecture as "
                         "this dataset, to initialize shared weights from")

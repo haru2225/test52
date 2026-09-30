@@ -2,7 +2,13 @@ __pycache__/
 *.sif
 *.pt
 *.tmp
-/sio2-si-only/
+# generation/training RESULTS (checkpoints, generated output) copied back from the HPC side
+# land under sio2-si-only/ too -- ignore everything there except the one bundled, prepared
+# dataset (built from md/nvt_traj_0..7.lammpstrj, see test52's README) that ships as source so
+# `train` has something to run against without needing the raw trajectory files on the HPC side.
+/sio2-si-only/*
+!/sio2-si-only/dataset-dense/
+!/sio2-si-only/dataset-dense/**
 # generation/training results copied back from the HPC side (not source, don't commit).
 # Unanchored on purpose: these get copied into ad hoc, differently-named result directories
 # (test50/, test50-v2/, generated_noised/, ...) that can't all be listed by name in advance.
@@ -11,3 +17,4 @@ generation.json
 generation_restart.pt
 positions.npy
 training.json
+!/sio2-si-only/dataset-dense/positions.npy
