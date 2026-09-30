@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# test52: test38's model/sampler (unchanged) on an SiO2 Si-only CG mapping (one CG site per
+# original Si atom, every O dropped). Single script, three argparse subcommands (STAGE):
+#   qsub -P PROJECT_ID -v STAGE=prepare,OUTPUT=sio2-si-only/dataset-pilot      run_test52.pbs
+#   qsub -P PROJECT_ID -v STAGE=train,DATASET=sio2-si-only/dataset-pilot,OUTPUT=sio2-si-only/checkpoint1 run_test52.pbs
+#   qsub -P PROJECT_ID -v STAGE=generate,CHECKPOINT=sio2-si-only/checkpoint1/checkpoint.pt,OUTPUT=sio2-si-only/checkpoint1/generated run_test52.pbs
+# Unlike test45-49, DM2/graphite is not needed -- test52.py is fully self-contained (see its own
+# module docstring), so no DM2_ROOT bind-mount is set up here.
+#PBS -q sg8
+#PBS -N test52
+#PBS -l walltime=20:00:00
+#PBS -l select=1:ncpus=8:mpiprocs=1:ompthreads=8:mem=32gb:ngpus=1
+#PBS -j oe
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(dirname "${BASH_SOURCE[0]}")}"
+work_dir="$(pwd -P)"
+stage="${STAGE:?Set STAGE=prepare, STAGE=train, or STAGE=generate}"
+
+runtime="${CONTAINER_RUNTIME:-singularity}"
+if ! command -v "$runtime" >/dev/null 2>&1 && command -v apptainer >/dev/null 2>&1; then
+    runtime=apptainer
+fi
+command -v "$runtime" >/dev/null 2>&1 || { echo 'Load Singularity or Apptainer first.' >&2; exit 2; }
+sif="${SIF_IMAGE:-$work_dir/test52.sif}"
+[[ -r "$sif" ]] || { echo "Missing container: $sif (build it: singularity build $sif Singularity.def)" >&2; exit 2; }
+
+# Translate qsub -v environment variables into test52.py's argparse flags. Only variables that
+# are actually set get passed through; everything else falls back to test52.py's own defaults
+# (train/generate already default --cutoff/--large-cutoff to 5.0, tuned for this SiO2 box -- see
+# test52.py's own module docstring).
+args=("$stage")
+case "$stage" in
+    prepare)
+        args+=(--output "${OUTPUT:?Set OUTPUT}")
+        [[ -n "${REFERENCE_FRAMES:-}" ]] && args+=(--reference-frames "$REFERENCE_FRAMES")
+        [[ -n "${TEMPERATURE_K:-}"    ]] && args+=(--temperature-k "$TEMPERATURE_K")
+        [[ -n "${STRIDE:-}"           ]] && args+=(--stride "$STRIDE")
+        [[ -n "${REPLICATE:-}"        ]] && args+=(--replicate "$REPLICATE")
+        # TRAJECTORIES: space-separated list of raw .lammpstrj paths, e.g.
+        #   -v TRAJECTORIES="../../../md/nvt_traj_0.lammpstrj ../../../md/nvt_traj_1.lammpstrj"
+        if [[ -n "${TRAJECTORIES:-}" ]]; then
+            args+=(--trajectories)
+            for path in $TRAJECTORIES; do args+=("$path"); done
+        fi
+        [[ -n "${OFFSET:-}"           ]] && args+=(--offset "$OFFSET")
+        ;;
+    train)
+        args+=(--dataset "${DATASET:?Set DATASET}" --output "${OUTPUT:?Set OUTPUT}")
+        [[ -n "${WARM_START:-}"          ]] && args+=(--warm-start "$WARM_START")
+        [[ -n "${UPDATES:-}"             ]] && args+=(--updates "$UPDATES")
+        [[ -n "${BATCH_SIZE:-}"          ]] && args+=(--batch-size "$BATCH_SIZE")
+        [[ -n "${LEARNING_RATE:-}"       ]] && args+=(--learning-rate "$LEARNING_RATE")
+        [[ -n "${CUTOFF:-}"              ]] && args+=(--cutoff "$CUTOFF")
+        [[ -n "${LARGE_CUTOFF:-}"        ]] && args+=(--large-cutoff "$LARGE_CUTOFF")
+        [[ -n "${SIGMA_MIN:-}"           ]] && args+=(--sigma-min "$SIGMA_MIN")
+        [[ -n "${SIGMA_MAX:-}"           ]] && args+=(--sigma-max "$SIGMA_MAX")
+        [[ -n "${VALIDATION_FRACTION:-}" ]] && args+=(--validation-fraction "$VALIDATION_FRACTION")
+        [[ -n "${LOG_EVERY:-}"           ]] && args+=(--log-every "$LOG_EVERY")
+        [[ -n "${IRREPS_HIDDEN:-}"       ]] && args+=(--irreps-hidden "$IRREPS_HIDDEN")
+        [[ -n "${IRREPS_EDGE:-}"         ]] && args+=(--irreps-edge "$IRREPS_EDGE")
+        ;;
+    generate)
+        args+=(--checkpoint "${CHECKPOINT:?Set CHECKPOINT}" --output "${OUTPUT:?Set OUTPUT}")
+        [[ -n "${INIT:-}"                 ]] && args+=(--init "$INIT")
+        [[ -n "${REVERSE_STEPS:-}"        ]] && args+=(--reverse-steps "$REVERSE_STEPS")
+        [[ -n "${DETERMINISTIC_STEPS:-}"  ]] && args+=(--deterministic-steps "$DETERMINISTIC_STEPS")
+        [[ -n "${START_SIGMA:-}"          ]] && args+=(--start-sigma "$START_SIGMA")
+        [[ -n "${SIGMA_MIN:-}"            ]] && args+=(--sigma-min "$SIGMA_MIN")
+        [[ -n "${THERMAL_SCALE:-}"        ]] && args+=(--thermal-scale "$THERMAL_SCALE")
+        [[ -n "${TRAJECTORY_STRIDE:-}"    ]] && args+=(--trajectory-stride "$TRAJECTORY_STRIDE")
+        ;;
+    *) echo 'STAGE must be prepare, train, or generate' >&2; exit 2 ;;
+esac
+if [[ "$stage" != "prepare" ]]; then
+    [[ -n "${DEVICE:-}"            ]] && args+=(--device "$DEVICE") || args+=(--device cuda)
+    [[ -n "${SEED:-}"              ]] && args+=(--seed "$SEED")
+    [[ -n "${TIME_BUDGET_HOURS:-}" ]] && args+=(--time-budget-hours "$TIME_BUDGET_HOURS")
+    [[ -n "${CHECKPOINT_EVERY:-}"  ]] && args+=(--checkpoint-every "$CHECKPOINT_EVERY")
+    [[ -n "${RESUME:-}"            ]] && args+=(--resume)
+fi
+
+exec "$runtime" exec --nv --bind "$work_dir:$work_dir" --pwd "$work_dir" \
+    --env OMP_NUM_THREADS=8 --env MKL_NUM_THREADS=8 \
+    "$sif" python -u "$work_dir/test52.py" "${args[@]}"

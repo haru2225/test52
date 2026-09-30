@@ -1,0 +1,32 @@
+Bootstrap: docker
+From: pytorch/pytorch:2.5.0-cuda12.4-cudnn9-runtime
+
+%labels
+    Description "PyTorch CUDA + e3nn 0.4.4 runtime for test52 (self-contained: no DM2/graphite needed)"
+
+%post
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    apt-get install -y --no-install-recommends ca-certificates libgomp1
+    rm -rf /var/lib/apt/lists/*
+
+    python -m pip install --no-cache-dir --upgrade pip
+    python -m pip install --no-cache-dir \
+        numpy==1.26.4 \
+        scipy \
+        ase==3.29.0 \
+        torch-geometric==2.6.1 \
+        e3nn==0.4.4
+    # Unlike test45-49, test52.py vendors NequIP/Interaction/RattleParticles/DownselectEdges
+    # itself (same code test38.py vendors from DM2) and never imports `graphite` -- no DM2
+    # checkout or DM2_ROOT bind-mount is needed at run time, only Docker Hub + PyPI to build.
+
+%environment
+    export PYTHONNOUSERSITE=1
+    export PYTHONUNBUFFERED=1
+    export MPLCONFIGDIR=/tmp/matplotlib-test52
+
+%test
+    python -c "import ase, e3nn, torch, torch_geometric; print('torch', torch.__version__, 'e3nn', e3nn.__version__)"
+    python -c "import graphite" 2>/dev/null && echo 'unexpected: graphite importable' && exit 1
+    echo 'graphite not present, as expected (test52 does not need it)'

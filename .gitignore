@@ -1,0 +1,13 @@
+__pycache__/
+*.sif
+*.pt
+*.tmp
+/sio2-si-only/
+# generation/training results copied back from the HPC side (not source, don't commit).
+# Unanchored on purpose: these get copied into ad hoc, differently-named result directories
+# (test50/, test50-v2/, generated_noised/, ...) that can't all be listed by name in advance.
+*.extxyz
+generation.json
+generation_restart.pt
+positions.npy
+training.json
