@@ -45,15 +45,27 @@ test38/50's raw unwrapped displacement.
 This fixes a real, previously-unaddressed correctness gap test50/51 both inherited from test38:
 their reverse loop's math *assumes* the starting position already carries `sigma=start_sigma` of
 noise, but a clean or crystal-noised start never actually received that much real corruption in a
-periodicity-consistent way — and `--init random` was never verified to be in-distribution for a
-non-periodic noise model's `sigma_max` in the first place. With periodic noise, `train()` now
-enforces (test39's own criterion) that `--sigma-max` is large enough for the terminal distribution
-to actually be near-uniform over the cell before training starts — **on the native 13.573 Å box
-this requires `sigma-max ≳ 10.4 Å`**, dramatically larger than test50's `sigma-max=1.5` (which was
-tuned for real-space *local* corruption, a completely different regime). `--sigma-max` now
-defaults to the dataset's own box length when omitted (test39's convention) rather than a fixed
-1.5. `--init random` is consequently now a well-defined "generate from nothing" test, not an open
-question.
+periodicity-consistent way. `train()` checks (test39's own Fourier-residual criterion) whether
+`--sigma-max` is large enough for the terminal distribution to actually be near-uniform over the
+cell — **on the native 13.573 Å box this requires `sigma-max ≳ 10.4 Å`** — and prints a `NOTE`
+(not a hard error) when it isn't, since this only matters for `--init random`, not for `--init
+crystal`/`crystal-noised`.
+
+**`--sigma-max` defaults to 1.5 — the same value as test50 — not the box's own longest side.** This
+was changed back from an earlier "auto = box length" default specifically so test50 and test52 can
+be compared on the same sigma range (same training-corruption regime), isolating the effect of
+periodic vs. non-periodic noise handling from the effect of training over a wider sigma range.
+**Consequence: `--init random` is NOT a well-defined "generate from nothing" test by default here**
+(the printed `NOTE` says so) — pass a larger `--sigma-max` explicitly (e.g. the box's own longest
+side) if you want that guarantee back.
+
+**On comparing the training loss number itself against test50's**: don't, directly. test50's loss
+is MSE on raw `dx = sigma*eps` (Å², scales with sigma up to 1.5 Å); test52's loss is MSE on
+`-sigma*score` (unitless, ≈ `-eps` i.e. order-1 for small sigma, shrinking toward 0 as sigma grows
+toward the uniform-terminal regime) — different target quantities on different scales, not
+comparable as raw numbers. Compare trained models by actually generating and checking per-atom
+displacement from the true lattice sites (test50's own README documents this test), not by loss
+magnitude.
 
 Side effect: since the graph is always rebuilt fresh from the actual post-noise (wrapped)
 positions, `--large-cutoff`'s original role (a wider pre-noise candidate margin before
@@ -79,13 +91,16 @@ module load singularity
 singularity build test52.sif Singularity.def
 
 # 1. Train directly against the bundled sio2-si-only/dataset-dense/
-#    (cutoff=8.0/8.2, irreps l<=4, updates=50000 inherited from test50;
-#    sigma-max auto-defaults to the dataset's own box length, 27.146 A)
-qsub -P PROJECT_ID -v STAGE=train,OUTPUT=sio2-si-only/checkpoint1 run_test52.pbs
+#    (cutoff=8.0/8.2, irreps l<=4, sigma-max=1.5 (same as test50, for a direct loss comparison),
+#    updates=50000 inherited from test50). BATCH_SIZE lowered from the default 16: each graph is
+#    now 512 atoms (--replicate 2) at cutoff=8, which CUDA-OOMs at batch 16 on modest GPUs --
+#    lower further (e.g. 2) if it still OOMs, before lowering cutoff/irreps.
+qsub -P PROJECT_ID -v STAGE=train,OUTPUT=sio2-si-only/checkpoint1,BATCH_SIZE=4 run_test52.pbs
 
-# 2. Generate, now with a well-defined --init random
+# 2. Generate (crystal-noised, like test50 -- --init random needs a larger --sigma-max to be
+#    well-defined at train time, see "sigma-max defaults to 1.5" above)
 qsub -P PROJECT_ID -v STAGE=generate,CHECKPOINT=sio2-si-only/checkpoint1/checkpoint.pt,\
-OUTPUT=sio2-si-only/checkpoint1/generated,INIT=random,\
+OUTPUT=sio2-si-only/checkpoint1/generated,INIT=crystal-noised,\
 REVERSE_STEPS=3000,DETERMINISTIC_STEPS=300,TRAJECTORY_STRIDE=10 \
     run_test52.pbs
 ```
@@ -93,9 +108,9 @@ REVERSE_STEPS=3000,DETERMINISTIC_STEPS=300,TRAJECTORY_STRIDE=10 \
 Locally (no PBS/Singularity):
 
 ```bash
-python test52.py train --output sio2-si-only/checkpoint1 --device cuda   # uses bundled dataset-dense/
+python test52.py train --output sio2-si-only/checkpoint1 --batch-size 4 --device cuda   # uses bundled dataset-dense/
 python test52.py generate --checkpoint sio2-si-only/checkpoint1/checkpoint.pt \
-    --output sio2-si-only/checkpoint1/generated --init random --device cuda
+    --output sio2-si-only/checkpoint1/generated --init crystal-noised --device cuda
 ```
 
 To rebuild the dataset yourself (e.g. from your own additional trajectories), `prepare` is still
@@ -112,13 +127,15 @@ OFFSET=500,STRIDE=10 \
 ## Status
 
 Smoke-tested locally (CPU): `prepare` from raw trajectories (single-file, multi-file, combined
-with `--replicate`), `train` with the auto-computed sigma-max — including a full run against the
-**actual bundled `dataset-dense/`** (4308 frames, cutoff=8, l≤4, 512 atoms/graph; 3 updates
-completed correctly, checkpoint saved, ~14 MB) — and `generate` in all three `--init` modes all run
-end to end without error. The sigma-max validity guard was verified to correctly reject an
-under-sized `--sigma-max` (e.g. test50's old default of 1.5, which fails badly on this box —
-Fourier residual 0.79 instead of the required ≤1e-5) and to accept the auto-computed default.
-`generate --init random`'s periodic wrap was verified to keep all positions within the cell.
-**Not yet trained for real (only a few smoke-test updates) or run on GPU** — whether periodic noise
+with `--replicate`), `train` with `--sigma-max 1.5` (default) and with an explicit larger value —
+including a full run against the **actual bundled `dataset-dense/`** (4308 frames, cutoff=8, l≤4,
+512 atoms/graph; 3 updates completed correctly, checkpoint saved, ~14 MB) — and `generate` in all
+three `--init` modes (including `trajectory.extxyz` export) all run end to end without error. The
+sigma-max NOTE was verified to print (not block) at the default 1.5 and stay silent at a
+sufficiently large explicit value. `generate --init random`'s periodic wrap was verified to keep
+all positions within the cell. On GPU, the default `--batch-size 16` against `dataset-dense/`
+(512 atoms/graph, cutoff=8, l≤4) was reported to CUDA-OOM — see the lowered `BATCH_SIZE=4` in the
+Usage section above.
+**Not yet trained for real (only a few smoke-test updates) or run successfully on GPU** — whether periodic noise
 + denser, genuinely-independent 8-replica data actually closes the per-atom lattice-site gap
 test50 showed is unverified.

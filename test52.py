@@ -30,10 +30,14 @@ motion, and not improving with more reverse steps within one run):
     inherited from test38: their reverse loop's math ASSUMES the starting position already carries
     sigma=start_sigma of noise, but a clean or crystal-noised start never actually receives that
     much real periodic corruption -- and their `--init random` was never verified to be
-    in-distribution for a non-periodic noise model's sigma_max in the first place. With periodic
-    noise, `train()` now checks (test39's own criterion) that `--sigma-max` is large enough that
-    the terminal distribution is actually uniform over the cell before allowing training to start,
-    so `--init random` is now well-defined rather than an open question.
+    in-distribution for a non-periodic noise model's sigma_max in the first place. `train()` checks
+    (test39's own Fourier-residual criterion) whether `--sigma-max` is large enough for the terminal
+    distribution to actually be uniform over the cell, and prints a NOTE (not a hard error -- this
+    only matters for `--init random`, not `--init crystal`/`crystal-noised`) when it isn't.
+    `--sigma-max` DEFAULTS TO 1.5 -- test50's own value, not the box's own longest side -- so a
+    direct, same-sigma-range loss comparison against test50 is the default; this means `--init
+    random` is NOT well-defined by default here (pass a larger `--sigma-max`, e.g. the box's own
+    longest side, explicitly if you want that).
 
 Everything else -- the coarse-graining (Si-only, index-preserving), NequIP_TimeEmbed itself,
 cutoff/large-cutoff/irreps/updates defaults, `--replicate`, the train-time half-box safety guard,
@@ -833,18 +837,22 @@ def wrapped_score_target(noisy, clean, lengths, sigma):
 
 def sigma_max_for(cells, requested):
     # 要求されたsigma-max(未指定ならNone)を検証、またはセルの最長辺から自動決定する。
-    # test39と同じ基準: 終端(sigma=sigma_max)でのフーリエ残差が十分小さくないと、
-    # 「セル内一様分布」という前提(--init randomや理論上の終端分布)が成り立たない。
+    # test39と同じ基準(終端でのフーリエ残差)で判定するが、test39と違って無条件のraiseには
+    # しない: 「終端がセル内一様分布に近いか」は--init randomにしか関係せず、
+    # --init crystal/crystal-noisedはこの前提を全く必要としないため。test50との直接比較用に
+    # sigma-min=0.001/sigma-max=1.5(局所的な揺らぎのみ)をデフォルトにしたので、デフォルトの
+    # ままでは終端は一様分布から程遠い(それ自体は--init crystal/crystal-noisedの使用には
+    # 無害) -- 警告を出すだけに留め、学習を止めない。
     box_length = float(np.asarray(cells)[:, [0, 1, 2], [0, 1, 2]].max())
     sigma_max = float(requested) if requested else box_length
     residual = math.exp(-2 * math.pi**2 * (sigma_max / box_length) ** 2)
     if residual > 1e-5:
         minimum = math.sqrt(-math.log(1e-5) / (2 * math.pi**2)) * box_length
-        raise ValueError(
-            f"--sigma-max ({sigma_max:.4g}) is too small relative to the box ({box_length:.4g} A) "
-            f"for the terminal distribution to be near-uniform (Fourier residual={residual:.3g}); "
-            f"use --sigma-max >= {minimum:.4g}, or omit --sigma-max to default to the box's own "
-            f"longest side ({box_length:.4g} A), matching test39's own convention.")
+        print(f"NOTE: --sigma-max ({sigma_max:.4g}) is too small relative to the box "
+              f"({box_length:.4g} A) for the terminal distribution to be near-uniform "
+              f"(Fourier residual={residual:.3g}, need --sigma-max >= {minimum:.4g} for that). "
+              f"This is fine for --init crystal/crystal-noised; --init random will NOT be a "
+              f"well-defined 'generate from nothing' test at this sigma-max.", flush=True)
     return sigma_max
 
 
@@ -858,9 +866,8 @@ def train(args):
     if args.large_cutoff < args.cutoff:
         raise ValueError("Require large-cutoff >= cutoff")
     # test52固有(test39から): sigma-maxがセルの大きさに対して十分大きくないと、終端分布が
-    # セル内一様分布に近づかない(周期ノイズなので、test50のsigma-max=1.5のような「局所的な
-    # 揺らぎ」のスケールでは全く足りない -- 未指定ならセルの最長辺そのものをデフォルトにする、
-    # test39と同じ規約)。
+    # セル内一様分布に近づかない(--init randomにのみ関係する基準。デフォルトのsigma-max=1.5
+    # はtest50と同じ値で、この基準を満たさないが、警告が出るだけで学習は止まらない)。
     sigma_max = sigma_max_for(cells, args.sigma_max)
     # test50固有のガード(test38にはない): cutoff/large_cutoffが半箱以上だと、同じ原子対が
     # 2つ以上の周期像を通じて二重に繋がってしまう(test33/48で文書化された周期像重複バグ)。
@@ -1223,12 +1230,14 @@ def parser():
     # CLI引数として残してある(test50からのインターフェース継続性)。
     p.add_argument("--large-cutoff", type=positive, default=8.2)
     p.add_argument("--sigma-min", type=positive, default=0.001)
-    # test52固有: 周期ノイズでは「セル内一様分布に十分近い終端分布」を得るのに必要な
-    # sigma-maxが箱のサイズそのもので決まる(train()のsigma_max_for()参照)。test50の
-    # sigma-max=1.5(局所的な揺らぎのスケール)は、周期ノイズの下ではこの基準を満たさない
-    # (例: 箱13.573Aに対し必要な最小値は~10.4A)。そのためデフォルトをNone(未指定)に変更し、
-    # 未指定時はセルの最長辺をそのまま使う(test39と同じ規約)。
-    p.add_argument("--sigma-max", type=positive, default=None)
+    # 以前はデフォルトNone(未指定時はセルの最長辺を自動採用、終端分布が一様分布に近づく
+    # ことを保証)にしていたが、test50(sigma-max=1.5)とtest52を同じノイズ範囲で直接
+    # 比較したいという要望により、1.5に戻した(test50と同じ値)。これにより終端分布は
+    # もう一様分布に近くない(--init randomの前提が崩れる)が、--init crystal/crystal-noised
+    # には影響しない。sigma_max_for()はこの場合、学習を止めずに警告を出すだけにしてある。
+    # セルの最長辺を自動採用したい場合は--sigma-maxを省略ではなく、明示的に大きな値
+    # (例: 箱13.573Aなら10.4以上)を渡すこと(省略時のデフォルトは1.5になった)。
+    p.add_argument("--sigma-max", type=positive, default=1.5)
     # test50独自の追加(test38にはこの2つのCLI引数はなく、architecture()内にl<=1隠れ層/
     # l<=2エッジでハードコードされている)。要望により、l=4まで広げた構成
     # (test47/48のl<=5構成を1段階切り詰めたもの)をデフォルトに変更 -- 追加のフラグなしで
@@ -1250,10 +1259,12 @@ def parser():
                         "periodic noise model training uses (pos = (pos + start_sigma*randn) mod "
                         "cell) before the reverse loop starts. 'random': atoms placed "
                         "independently uniformly at random in the cell -- with periodic noise "
-                        "(unlike test50/51's real-space noise) this is now provably the correct "
-                        "terminal distribution at sigma=sigma_max (train()'s own Fourier-residual "
-                        "check enforces this at training time), so this is a well-defined "
-                        "'generate from nothing' test, not an open question.")
+                        "AND a large enough --sigma-max at training time, this provably IS the "
+                        "correct terminal distribution (unlike test50/51's real-space noise, "
+                        "where it never was); train() prints a NOTE instead of enforcing this, "
+                        "since the default --sigma-max=1.5 (matching test50, for a direct loss "
+                        "comparison) does NOT reach it -- check that NOTE before trusting this "
+                        "mode's results.")
     p.add_argument("--reverse-steps", type=count, default=300)  # sigmaスケジュールの段数(細かいほど1歩あたりの補正が小さくなる)
     p.add_argument("--deterministic-steps", type=nonnegative_count, default=30)  # 末尾何ステップをノイズなし半強度更新にするか
     # test50は0.75(局所的な揺らぎのスケール)がデフォルトだったが、周期ノイズではそれでは
